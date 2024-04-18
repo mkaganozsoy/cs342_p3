@@ -101,6 +101,7 @@ int mf_init(){
     printf("MAX_MSGS_IN_QUEUE=%d\n", config.max_msgs_in_queue);
     printf("MAX_QUEUES_IN_SHMEM=%d\n", config.max_queues_in_shmem);
     printf("test 1\n");
+
     //create shared memory
     shared_mem sh_mem;
     shm_fd = shm_open(config.shmem_name, O_CREAT | O_RDWR, 0666);
