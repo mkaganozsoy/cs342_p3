@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <stdbool.h>
 
 mf_config config; // global variable to store the configuration
 int shm_fd = -1; // shared memory file descriptor
@@ -86,7 +87,7 @@ void* connect_shared_memory(const char* name, size_t size) {
 }
 
 
-mf_message_queue* mf_get_queue(int qid){
+mf_message_queue* mf_get_queue_by_id(int qid){
     // first get the shared memory struct
     shared_mem* sh_mem = (shared_mem*) shm_ptr;
     // start checking for qid in the message queues after the shared memory struct
@@ -101,19 +102,74 @@ mf_message_queue* mf_get_queue(int qid){
     return NULL;
 }
 
-void update_hole_for_create(int index, size_t size, shared_mem* sh_mem){
-    // update the hole
-    sh_mem->holes[index].offset += size;
-    sh_mem->holes[index].size -= size;
+mf_message_queue* mf_get_queue_by_name(char* mqname){
+    // first get the shared memory struct
+    shared_mem* sh_mem = (shared_mem*) shm_ptr;
+    // start checking for qid in the message queues after the shared memory struct
+    char *ptr = (char*) shm_ptr + sizeof(shared_mem);
+    for(int i = 0; i < sh_mem->mq_count; i++){
+        mf_message_queue* mq = (mf_message_queue*) ptr;
+        if(strcmp(mq->mq_name, mqname) == 0){
+            return mq;
+        }
+        ptr += sizeof(mf_message_queue) + mq->size;
+    }
+    return NULL;
+}
 
-    // if the hole is empty, remove it
-    if(sh_mem->holes[index].size == 0){
-        sh_mem->hole_count--;
-        for(int j = index; j < sh_mem->hole_count; j++){
-            sh_mem->holes[j] = sh_mem->holes[j+1];
+
+void update_hole(int index, size_t size, int operation, shared_mem* sh_mem) {
+    if (operation == 1) {  // Creating a new message queue
+        // Reduce the size of the hole
+        sh_mem->holes[index].offset += size;
+        sh_mem->holes[index].size -= size;
+
+        // If the hole is empty, remove it
+        if (sh_mem->holes[index].size == 0) {
+            sh_mem->hole_count--;
+            for (int j = index; j < sh_mem->hole_count; j++) {
+                sh_mem->holes[j] = sh_mem->holes[j + 1];
+            }
+        }
+    } else if (operation == 2) {  // Removing a message queue
+        size_t mq_offset = sh_mem->holes[index].offset;
+        size_t mq_size = size;
+        size_t mq_end = mq_offset + mq_size;
+        int hole_before = -1;
+        int hole_after = -1;
+
+        // Check for existing holes before and after the message queue
+        for (int i = 0; i < sh_mem->hole_count; i++) {
+            if (sh_mem->holes[i].offset + sh_mem->holes[i].size == mq_offset) {
+                hole_before = i;
+            }
+            if (sh_mem->holes[i].offset == mq_end) {
+                hole_after = i;
+            }
+        }
+
+        // Merge with previous and/or next hole if available
+        if (hole_before != -1 && hole_after != -1) {
+            sh_mem->holes[hole_before].size += (mq_size + sh_mem->holes[hole_after].size);
+            // Remove the hole after as it's now merged
+            for (int j = hole_after; j < sh_mem->hole_count - 1; j++) {
+                sh_mem->holes[j] = sh_mem->holes[j + 1];
+            }
+            sh_mem->hole_count--;
+        } else if (hole_before != -1) {
+            sh_mem->holes[hole_before].size += mq_size;
+        } else if (hole_after != -1) {
+            sh_mem->holes[hole_after].offset = mq_offset;
+            sh_mem->holes[hole_after].size += mq_size;
+        } else {
+            // No adjacent holes, create a new hole
+            sh_mem->holes[sh_mem->hole_count].offset = mq_offset;
+            sh_mem->holes[sh_mem->hole_count].size = mq_size;
+            sh_mem->hole_count++;
         }
     }
 }
+
 
 int mf_init(){
 
@@ -286,7 +342,7 @@ int mf_create(char* mqname, int mqsize){
                 return MF_ERROR;
             }
 
-            update_hole_for_create(i, real_mq_size, sh_mem);
+            update_hole(i, real_mq_size, 1, sh_mem);
             printf("Message queue created with id %d\n", mq->qid);
             return MF_SUCCESS;
         }
@@ -295,10 +351,37 @@ int mf_create(char* mqname, int mqsize){
     return MF_ERROR;
 }
 
-int mf_remove(char* mqname){
-    return 0;
-}
+int mf_remove(char* mqname) {
 
+    // first get the shared memory struct
+    shared_mem* sh_mem = (shared_mem*) shm_ptr;
+
+    mf_message_queue* mq  = mf_get_queue_by_name(mqname);
+    if (mq == NULL) {
+        printf("Message queue %s not found\n", mqname);
+        return MF_ERROR;
+    }
+    // Check if the message queue is still in use
+    if (mq->reference_count > 0) {
+        return MF_ERROR;  // Cannot remove, still in use
+    }
+
+    // Close and unlink the semaphore
+    sem_close(mq->semaphore);
+    char sem_name[MAX_MQNAMESIZE + 5];  // Adjust for prefix length
+    sprintf(sem_name, "/sem_%s", mqname);
+    sem_unlink(sem_name);
+
+    // Calculate the size of the message queue for memory deallocation
+    size_t mq_size = sizeof(mf_message_queue) + mq->size;
+
+    // Adjust the hole for the removed message queue
+    update_hole(0, mq_size, 2, sh_mem);
+    sh_mem->mq_count--;
+
+    printf("Message queue %s removed successfully\n", mqname);
+    return MF_SUCCESS;
+}
 int mf_open(char* mqname){
     return 0;
 }
@@ -318,5 +401,37 @@ int mf_recv(int qid, void* bufptr, int bufsize){
 }
 
 int mf_print(){
-    return 0;
+    // first get the shared memory struct
+    shared_mem* sh_mem = (shared_mem*) shm_ptr;
+    printf("Shared Memory:\n");
+    printf("Size: %u\n", sh_mem->shm_size); // print unsigned int with
+    printf("Number of message queues: %d\n", sh_mem->mq_count);
+    printf("Number of holes: %d\n", sh_mem->hole_count);
+
+    // start checking for qid in the message queues after the shared memory struct
+    char *ptr = (char*) shm_ptr + sizeof(shared_mem);
+    printf("Message Queues:\n");
+    for(int i = 0; i < sh_mem->mq_count; i++){
+        mf_message_queue* mq = (mf_message_queue*) ptr;
+        printf("Message Queue %d:\n", mq->qid);
+        printf("Name: %s\n", mq->mq_name);
+        printf("Reference Count: %d\n", mq->reference_count);
+        printf("Size: %u\n", mq->size);
+        printf("Write Position: %d\n", mq->writePos);
+        printf("Read Position: %d\n", mq->readPos);
+        printf("Buffer: %p\n", mq->buffer);
+        printf("Offset: %lu\n", mq->offset);
+        printf("Semaphore address: %p\n", mq->semaphore);
+        ptr += sizeof(mf_message_queue) + mq->size;
+    }
+
+    // print the holes
+    printf("Holes:\n");
+    for(int i = 0; i < sh_mem->hole_count; i++){
+        printf("Hole %d:\n", i);
+        printf("Offset: %lu\n", sh_mem->holes[i].offset);
+        printf("Size: %lu\n", sh_mem->holes[i].size);
+    }
+
+    return MF_SUCCESS;
 }
