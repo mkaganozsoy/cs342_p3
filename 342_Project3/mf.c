@@ -86,6 +86,35 @@ void* connect_shared_memory(const char* name, size_t size) {
 }
 
 
+mf_message_queue* mf_get_queue(int qid){
+    // first get the shared memory struct
+    shared_mem* sh_mem = (shared_mem*) shm_ptr;
+    // start checking for qid in the message queues after the shared memory struct
+    char *ptr = (char*) shm_ptr + sizeof(shared_mem);
+    for(int i = 0; i < sh_mem->mq_count; i++){
+        mf_message_queue* mq = (mf_message_queue*) ptr;
+        if(mq->qid == qid){
+            return mq;
+        }
+        ptr += sizeof(mf_message_queue) + mq->size;
+    }
+    return NULL;
+}
+
+void update_hole_for_create(int index, size_t size, shared_mem* sh_mem){
+    // update the hole
+    sh_mem->holes[index].offset += size;
+    sh_mem->holes[index].size -= size;
+
+    // if the hole is empty, remove it
+    if(sh_mem->holes[index].size == 0){
+        sh_mem->hole_count--;
+        for(int j = index; j < sh_mem->hole_count; j++){
+            sh_mem->holes[j] = sh_mem->holes[j+1];
+        }
+    }
+}
+
 int mf_init(){
 
     //read config.txt file
@@ -217,7 +246,53 @@ int mf_disconnect(){
 }
 
 int mf_create(char* mqname, int mqsize){
-    return 0;
+    // first get the shared memory struct
+    shared_mem* sh_mem = (shared_mem*) shm_ptr;
+
+    size_t real_mq_size = sizeof(mf_message_queue) + mqsize;
+    // check if there is enough space in the shared memory for the new message queue
+    for(int i = 0; i < sh_mem->hole_count; i++){
+        if(sh_mem->holes[i].size >= real_mq_size){
+            // create the message queue
+            mf_message_queue* mq = (mf_message_queue*) ((char*) shm_ptr + sh_mem->holes[i].offset);
+            // update the number of message queues in the shared memory
+            sh_mem->mq_count++;
+
+            // initialize the message queue
+            mq->qid = sh_mem->mq_count;
+            // copy the message queue name using MAX_MQNAMESIZE
+            strncpy(mq->mq_name, mqname, MAX_MQNAMESIZE);
+
+            mq->reference_count = 0;
+            mq->size = mqsize;
+            mq->writePos = 0;
+            mq->readPos = 0;
+            mq->buffer = (char*) mq + sizeof(mf_message_queue);
+            mq->offset = sh_mem->holes[i].offset;
+
+            // it must be a named semaphore - check this part
+            //mq->semaphore = (sem_t*) ((char*) mq + sizeof(mf_message_queue) + mqsize);
+            //sem_init(mq->semaphore, 1, 1);
+            // initialize the named semaphore
+            char sem_name[MAX_MQNAMESIZE + 5]; // 5 for the prefix "/sem_"
+            sprintf(sem_name, "/sem_%s", mqname);
+            // use sem_unlink to remove the semaphore if it already exists
+            sem_unlink(sem_name);
+            // create the named semaphore
+            mq->semaphore = sem_open(sem_name, O_CREAT, 0666, 1);
+            if (mq->semaphore == SEM_FAILED) {
+                perror("sem_open in mf_create");
+                free(sem_name);
+                return MF_ERROR;
+            }
+
+            update_hole_for_create(i, real_mq_size, sh_mem);
+            printf("Message queue created with id %d\n", mq->qid);
+            return MF_SUCCESS;
+        }
+    }
+
+    return MF_ERROR;
 }
 
 int mf_remove(char* mqname){
@@ -237,6 +312,8 @@ int mf_send(int qid, void* bufptr, int datalen){
 }
 
 int mf_recv(int qid, void* bufptr, int bufsize){
+
+
     return 0;
 }
 

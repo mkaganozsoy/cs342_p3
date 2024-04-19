@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/Project3.dir/mfserver.c.o CMakeFiles/Project3.dir/mf.c.o CMakeFiles/Project3.dir/test.c.o CMakeFiles/Project3.dir/app2.c.o CMakeFiles/Project3.dir/app1.c.o -o Project3 
