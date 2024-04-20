@@ -10,7 +10,7 @@
 #define MAX_PROCESSES 16
 
 // min and max msg length
-#define MIN_DATALEN 1 // byte
+#define MIN_DATALEN 4 // byte
 #define MAX_DATALEN 4096 // bytes
 
 #define CONFIG_FILENAME "config.txt"
@@ -66,7 +66,7 @@ typedef struct {
 
 typedef struct {
     unsigned int shm_size;
-    void* shm_ptr;
+    //void* shm_ptr; // pointer to the shared memory
     int mq_count; // number of message queues in the shared memory
     sem_t shm_sem;
     mf_hole* holes;
